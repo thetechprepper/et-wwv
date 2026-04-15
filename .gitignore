@@ -1,0 +1,40 @@
+# Build directories
+/build/
+/build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Executables
+et-wwv
+
+# Object files
+*.o
+*.obj
+
+# Static and shared libraries
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Debug / coverage
+*.gcda
+*.gcno
+*.gcov
+*.out
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+compile_commands.json
