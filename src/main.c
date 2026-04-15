@@ -205,9 +205,12 @@ int main(int argc, char *argv[]) {
         double q2 = 0.0;
         uint32_t window_index = 0;
         uint32_t window_count = 0;
+        uint32_t estimated_window_count = 0;
         double min_power = -1.0;
         double max_power = -1.0;
         double sum_power = 0.0;
+        double threshold = 0.0;
+        double *window_powers = NULL;
 
         if (frame_size == 0) {
             fprintf(stderr, "Error: invalid frame size\n");
@@ -223,6 +226,19 @@ int main(int argc, char *argv[]) {
         total_frames = data_chunk_size / frame_size;
         total_samples = total_frames * num_channels;
         duration_seconds = (double)total_frames / (double)sample_rate;
+
+        estimated_window_count = (uint32_t)(total_frames / window_samples);
+        if (estimated_window_count == 0) {
+            estimated_window_count = 1;
+        }
+
+        window_powers = malloc(sizeof(double) * estimated_window_count);
+        if (window_powers == NULL) {
+            fprintf(stderr, "Error: memory allocation failed\n");
+            fclose(fp);
+            usage(argv[0]);
+            return 1;
+        }
 
         k = 0.5 + ((double)window_samples * target_freq / (double)sample_rate);
         omega = (2.0 * M_PI * k) / (double)window_samples;
@@ -241,6 +257,7 @@ int main(int argc, char *argv[]) {
 
         if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
             fprintf(stderr, "Error: could not seek to data chunk\n");
+            free(window_powers);
             fclose(fp);
             usage(argv[0]);
             return 1;
@@ -254,6 +271,7 @@ int main(int argc, char *argv[]) {
 
                 if (fread(sample_buf, 1, bytes_per_sample, fp) != bytes_per_sample) {
                     fprintf(stderr, "Error: could not read PCM sample data\n");
+                    free(window_powers);
                     fclose(fp);
                     usage(argv[0]);
                     return 1;
@@ -290,14 +308,10 @@ int main(int argc, char *argv[]) {
 
             if (window_index == window_samples) {
                 double power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
-                double window_start = (double)(frame + 1 - window_samples) / (double)sample_rate;
-                double window_end = (double)(frame + 1) / (double)sample_rate;
 
-                printf("Debug: window=%u start=%.3f end=%.3f power=%.6f\n",
-                       window_count,
-                       window_start,
-                       window_end,
-                       power);
+                if (window_count < estimated_window_count) {
+                    window_powers[window_count] = power;
+                }
 
                 if (min_power < 0.0 || power < min_power) {
                     min_power = power;
@@ -317,14 +331,32 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        threshold = window_count > 0 ? (sum_power / (double)window_count) : 0.0;
+
         printf("Debug: PCM sample read complete\n");
         printf("Stats: duration_seconds=%.3f\n", duration_seconds);
         printf("Stats: min_sample=%.6f max_sample=%.6f\n", min_sample, max_sample);
-        printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f\n",
+        printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f threshold=%.6f\n",
                window_count,
                min_power,
                max_power,
-               window_count > 0 ? sum_power / (double)window_count : 0.0);
+               window_count > 0 ? sum_power / (double)window_count : 0.0,
+               threshold);
+
+        for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
+            double window_start = ((double)i * (double)window_samples) / (double)sample_rate;
+            double window_end = ((double)(i + 1) * (double)window_samples) / (double)sample_rate;
+            int tone_present = window_powers[i] >= threshold;
+
+            printf("Debug: window=%u start=%.3f end=%.3f power=%.6f tone=%s\n",
+                   i,
+                   window_start,
+                   window_end,
+                   window_powers[i],
+                   tone_present ? "present" : "absent");
+        }
+
+        free(window_powers);
     }
 
     fclose(fp);
