@@ -4,6 +4,7 @@
 #include <getopt.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file>\n", prog);
@@ -193,6 +194,20 @@ int main(int argc, char *argv[]) {
         float min_sample = 1.0f;
         float max_sample = -1.0f;
         unsigned char sample_buf[4];
+        const double target_freq = 1000.0;
+        const uint32_t window_ms = 10;
+        uint32_t window_samples = (sample_rate * window_ms) / 1000;
+        double k;
+        double omega;
+        double coeff;
+        double q0 = 0.0;
+        double q1 = 0.0;
+        double q2 = 0.0;
+        uint32_t window_index = 0;
+        uint32_t window_count = 0;
+        double min_power = -1.0;
+        double max_power = -1.0;
+        double sum_power = 0.0;
 
         if (frame_size == 0) {
             fprintf(stderr, "Error: invalid frame size\n");
@@ -201,9 +216,17 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
+        if (window_samples == 0) {
+            window_samples = 1;
+        }
+
         total_frames = data_chunk_size / frame_size;
         total_samples = total_frames * num_channels;
         duration_seconds = (double)total_frames / (double)sample_rate;
+
+        k = 0.5 + ((double)window_samples * target_freq / (double)sample_rate);
+        omega = (2.0 * M_PI * k) / (double)window_samples;
+        coeff = 2.0 * cos(omega);
 
         printf("Debug: beginning PCM sample read\n");
         printf("Debug: bytes_per_sample=%u frame_size=%u total_frames=%llu total_samples=%llu\n",
@@ -211,6 +234,10 @@ int main(int argc, char *argv[]) {
                frame_size,
                (unsigned long long)total_frames,
                (unsigned long long)total_samples);
+        printf("Debug: window_ms=%u window_samples=%u target_freq=%.1f\n",
+               window_ms,
+               window_samples,
+               target_freq);
 
         if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
             fprintf(stderr, "Error: could not seek to data chunk\n");
@@ -220,6 +247,8 @@ int main(int argc, char *argv[]) {
         }
 
         for (uint64_t frame = 0; frame < total_frames; frame++) {
+            float mono_sample = 0.0f;
+
             for (uint16_t channel = 0; channel < num_channels; channel++) {
                 float sample_value = 0.0f;
 
@@ -248,12 +277,54 @@ int main(int argc, char *argv[]) {
                 if (sample_value > max_sample) {
                     max_sample = sample_value;
                 }
+
+                mono_sample += sample_value;
+            }
+
+            mono_sample /= (float)num_channels;
+
+            q0 = coeff * q1 - q2 + mono_sample;
+            q2 = q1;
+            q1 = q0;
+            window_index++;
+
+            if (window_index == window_samples) {
+                double power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
+                double window_start = (double)(frame + 1 - window_samples) / (double)sample_rate;
+                double window_end = (double)(frame + 1) / (double)sample_rate;
+
+                printf("Debug: window=%u start=%.3f end=%.3f power=%.6f\n",
+                       window_count,
+                       window_start,
+                       window_end,
+                       power);
+
+                if (min_power < 0.0 || power < min_power) {
+                    min_power = power;
+                }
+
+                if (max_power < 0.0 || power > max_power) {
+                    max_power = power;
+                }
+
+                sum_power += power;
+                window_count++;
+
+                q0 = 0.0;
+                q1 = 0.0;
+                q2 = 0.0;
+                window_index = 0;
             }
         }
 
         printf("Debug: PCM sample read complete\n");
         printf("Stats: duration_seconds=%.3f\n", duration_seconds);
         printf("Stats: min_sample=%.6f max_sample=%.6f\n", min_sample, max_sample);
+        printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f\n",
+               window_count,
+               min_power,
+               max_power,
+               window_count > 0 ? sum_power / (double)window_count : 0.0);
     }
 
     fclose(fp);
