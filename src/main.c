@@ -196,6 +196,9 @@ int main(int argc, char *argv[]) {
         unsigned char sample_buf[4];
         const double target_freq = 1000.0;
         const uint32_t window_ms = 10;
+        const double expected_tone_duration = 0.8;
+        const double min_match_duration = 0.6;
+        const double max_match_duration = 1.0;
         uint32_t window_samples = (sample_rate * window_ms) / 1000;
         double k;
         double omega;
@@ -373,6 +376,7 @@ int main(int argc, char *argv[]) {
             int in_interval = 0;
             uint32_t interval_start_index = 0;
             uint32_t interval_count = 0;
+            uint32_t candidate_count = 0;
 
             for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
                 if (!in_interval && tone_present[i]) {
@@ -387,6 +391,15 @@ int main(int argc, char *argv[]) {
                            start_time,
                            end_time,
                            interval_duration);
+
+                    if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
+                        printf("Match: start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                               start_time,
+                               end_time,
+                               interval_duration,
+                               expected_tone_duration);
+                        candidate_count++;
+                    }
 
                     interval_count++;
                     in_interval = 0;
@@ -403,10 +416,21 @@ int main(int argc, char *argv[]) {
                        end_time,
                        interval_duration);
 
+                if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
+                    printf("Match: start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                           start_time,
+                           end_time,
+                           interval_duration,
+                           expected_tone_duration);
+                    candidate_count++;
+                }
+
                 interval_count++;
             }
 
-            printf("Stats: interval_count=%u\n", interval_count);
+            printf("Stats: interval_count=%u candidate_count=%u\n",
+                   interval_count,
+                   candidate_count);
         }
 
         free(tone_present);
