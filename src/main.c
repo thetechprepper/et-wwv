@@ -211,6 +211,7 @@ int main(int argc, char *argv[]) {
         double sum_power = 0.0;
         double threshold = 0.0;
         double *window_powers = NULL;
+        int *tone_present = NULL;
 
         if (frame_size == 0) {
             fprintf(stderr, "Error: invalid frame size\n");
@@ -240,6 +241,15 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
+        tone_present = malloc(sizeof(int) * estimated_window_count);
+        if (tone_present == NULL) {
+            fprintf(stderr, "Error: memory allocation failed\n");
+            free(window_powers);
+            fclose(fp);
+            usage(argv[0]);
+            return 1;
+        }
+
         k = 0.5 + ((double)window_samples * target_freq / (double)sample_rate);
         omega = (2.0 * M_PI * k) / (double)window_samples;
         coeff = 2.0 * cos(omega);
@@ -257,6 +267,7 @@ int main(int argc, char *argv[]) {
 
         if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
             fprintf(stderr, "Error: could not seek to data chunk\n");
+            free(tone_present);
             free(window_powers);
             fclose(fp);
             usage(argv[0]);
@@ -271,6 +282,7 @@ int main(int argc, char *argv[]) {
 
                 if (fread(sample_buf, 1, bytes_per_sample, fp) != bytes_per_sample) {
                     fprintf(stderr, "Error: could not read PCM sample data\n");
+                    free(tone_present);
                     free(window_powers);
                     fclose(fp);
                     usage(argv[0]);
@@ -346,16 +358,58 @@ int main(int argc, char *argv[]) {
         for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
             double window_start = ((double)i * (double)window_samples) / (double)sample_rate;
             double window_end = ((double)(i + 1) * (double)window_samples) / (double)sample_rate;
-            int tone_present = window_powers[i] >= threshold;
+
+            tone_present[i] = window_powers[i] >= threshold;
 
             printf("Debug: window=%u start=%.3f end=%.3f power=%.6f tone=%s\n",
                    i,
                    window_start,
                    window_end,
                    window_powers[i],
-                   tone_present ? "present" : "absent");
+                   tone_present[i] ? "present" : "absent");
         }
 
+        {
+            int in_interval = 0;
+            uint32_t interval_start_index = 0;
+            uint32_t interval_count = 0;
+
+            for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
+                if (!in_interval && tone_present[i]) {
+                    in_interval = 1;
+                    interval_start_index = i;
+                } else if (in_interval && !tone_present[i]) {
+                    double start_time = ((double)interval_start_index * (double)window_samples) / (double)sample_rate;
+                    double end_time = ((double)i * (double)window_samples) / (double)sample_rate;
+                    double interval_duration = end_time - start_time;
+
+                    printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
+                           start_time,
+                           end_time,
+                           interval_duration);
+
+                    interval_count++;
+                    in_interval = 0;
+                }
+            }
+
+            if (in_interval) {
+                double start_time = ((double)interval_start_index * (double)window_samples) / (double)sample_rate;
+                double end_time = ((double)window_count * (double)window_samples) / (double)sample_rate;
+                double interval_duration = end_time - start_time;
+
+                printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
+                       start_time,
+                       end_time,
+                       interval_duration);
+
+                interval_count++;
+            }
+
+            printf("Stats: interval_count=%u\n", interval_count);
+        }
+
+        free(tone_present);
         free(window_powers);
     }
 
