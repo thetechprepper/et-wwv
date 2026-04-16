@@ -1,3 +1,9 @@
+/*
+ * Author  : Gaston Gonzalez, ChatGPT
+ * Date    : 15 April 2026
+ * Purpose : Sets the system clock to the next minute when the WWV 1000 Hz
+ *           tone completes.
+ */
 #include <errno.h>
 #include <math.h>
 #include <stdint.h>
