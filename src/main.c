@@ -417,7 +417,7 @@ static int detector_process_live_window(struct detector_state *state, double pow
                    state->expected_tone_duration);
 
             if (state->set_clock_enabled) {
-                print_local_time("Current system time", state->target_time.tv_sec - 60);
+                //print_local_time("Current system time", state->target_time.tv_sec - 60);
                 print_local_time("Setting system time", state->target_time.tv_sec);
 
                 if (set_system_time(&state->target_time) != 0) {
