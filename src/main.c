@@ -7,7 +7,7 @@
 #include <math.h>
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s -f <file>\n", prog);
+    fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
 }
 
 static uint16_t read_le16(const unsigned char *buf) {
@@ -26,6 +26,7 @@ int main(int argc, char *argv[]) {
     unsigned char header[12];
     unsigned char chunk_header[8];
     unsigned char fmt_data[16];
+    int debug = 0;
     int found_fmt = 0;
     int found_data = 0;
     uint16_t audio_format = 0;
@@ -38,14 +39,18 @@ int main(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"file", required_argument, 0, 'f'},
         {"help", no_argument, 0, 'h'},
+        {"debug", no_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "f:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "f:hd", long_options, NULL)) != -1) {
         switch (opt) {
             case 'f':
                 file_path = optarg;
+                break;
+            case 'd':
+                debug = 1;
                 break;
             case 'h':
                 usage(argv[0]);
@@ -68,7 +73,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Debug: opened file: %s\n", file_path);
+    if (debug) {
+        printf("Debug: opened file: %s\n", file_path);
+    }
 
     if (fread(header, 1, sizeof(header), fp) != sizeof(header)) {
         fprintf(stderr, "Error: could not read WAV header: %s\n", file_path);
@@ -84,7 +91,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Debug: valid RIFF/WAVE header detected\n");
+    if (debug) {
+        printf("Debug: valid RIFF/WAVE header detected\n");
+    }
 
     while (fread(chunk_header, 1, sizeof(chunk_header), fp) == sizeof(chunk_header)) {
         uint32_t chunk_size = read_le32(chunk_header + 4);
@@ -110,9 +119,11 @@ int main(int argc, char *argv[]) {
             bits_per_sample = read_le16(fmt_data + 14);
             found_fmt = 1;
 
-            printf("Debug: fmt chunk found\n");
-            printf("Debug: audio_format=%u channels=%u sample_rate=%u bits_per_sample=%u\n",
-                   audio_format, num_channels, sample_rate, bits_per_sample);
+            if (debug) {
+                printf("Debug: fmt chunk found\n");
+                printf("Debug: audio_format=%u channels=%u sample_rate=%u bits_per_sample=%u\n",
+                       audio_format, num_channels, sample_rate, bits_per_sample);
+            }
 
             if (chunk_size > 16) {
                 if (fseek(fp, chunk_size - 16, SEEK_CUR) != 0) {
@@ -127,9 +138,11 @@ int main(int argc, char *argv[]) {
             data_chunk_offset = ftell(fp);
             found_data = 1;
 
-            printf("Debug: data chunk found\n");
-            printf("Debug: data_chunk_size=%u data_chunk_offset=%ld\n",
-                   data_chunk_size, data_chunk_offset);
+            if (debug) {
+                printf("Debug: data chunk found\n");
+                printf("Debug: data_chunk_size=%u data_chunk_offset=%ld\n",
+                       data_chunk_size, data_chunk_offset);
+            }
             break;
         } else {
             if (fseek(fp, chunk_size, SEEK_CUR) != 0) {
@@ -257,16 +270,18 @@ int main(int argc, char *argv[]) {
         omega = (2.0 * M_PI * k) / (double)window_samples;
         coeff = 2.0 * cos(omega);
 
-        printf("Debug: beginning PCM sample read\n");
-        printf("Debug: bytes_per_sample=%u frame_size=%u total_frames=%llu total_samples=%llu\n",
-               bytes_per_sample,
-               frame_size,
-               (unsigned long long)total_frames,
-               (unsigned long long)total_samples);
-        printf("Debug: window_ms=%u window_samples=%u target_freq=%.1f\n",
-               window_ms,
-               window_samples,
-               target_freq);
+        if (debug) {
+            printf("Debug: beginning PCM sample read\n");
+            printf("Debug: bytes_per_sample=%u frame_size=%u total_frames=%llu total_samples=%llu\n",
+                   bytes_per_sample,
+                   frame_size,
+                   (unsigned long long)total_frames,
+                   (unsigned long long)total_samples);
+            printf("Debug: window_ms=%u window_samples=%u target_freq=%.1f\n",
+                   window_ms,
+                   window_samples,
+                   target_freq);
+        }
 
         if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
             fprintf(stderr, "Error: could not seek to data chunk\n");
@@ -348,15 +363,17 @@ int main(int argc, char *argv[]) {
 
         threshold = window_count > 0 ? (sum_power / (double)window_count) : 0.0;
 
-        printf("Debug: PCM sample read complete\n");
-        printf("Stats: duration_seconds=%.3f\n", duration_seconds);
-        printf("Stats: min_sample=%.6f max_sample=%.6f\n", min_sample, max_sample);
-        printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f threshold=%.6f\n",
-               window_count,
-               min_power,
-               max_power,
-               window_count > 0 ? sum_power / (double)window_count : 0.0,
-               threshold);
+        if (debug) {
+            printf("Debug: PCM sample read complete\n");
+            printf("Stats: duration_seconds=%.3f\n", duration_seconds);
+            printf("Stats: min_sample=%.6f max_sample=%.6f\n", min_sample, max_sample);
+            printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f threshold=%.6f\n",
+                   window_count,
+                   min_power,
+                   max_power,
+                   window_count > 0 ? sum_power / (double)window_count : 0.0,
+                   threshold);
+        }
 
         for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
             double window_start = ((double)i * (double)window_samples) / (double)sample_rate;
@@ -364,12 +381,14 @@ int main(int argc, char *argv[]) {
 
             tone_present[i] = window_powers[i] >= threshold;
 
-            printf("Debug: window=%u start=%.3f end=%.3f power=%.6f tone=%s\n",
-                   i,
-                   window_start,
-                   window_end,
-                   window_powers[i],
-                   tone_present[i] ? "present" : "absent");
+            if (debug) {
+                printf("Debug: window=%u start=%.3f end=%.3f power=%.6f tone=%s\n",
+                       i,
+                       window_start,
+                       window_end,
+                       window_powers[i],
+                       tone_present[i] ? "present" : "absent");
+            }
         }
 
         {
@@ -377,6 +396,8 @@ int main(int argc, char *argv[]) {
             uint32_t interval_start_index = 0;
             uint32_t interval_count = 0;
             uint32_t candidate_count = 0;
+
+            printf("WWV 1000 Hz candidate tones:\n");
 
             for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
                 if (!in_interval && tone_present[i]) {
@@ -387,18 +408,21 @@ int main(int argc, char *argv[]) {
                     double end_time = ((double)i * (double)window_samples) / (double)sample_rate;
                     double interval_duration = end_time - start_time;
 
-                    printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
-                           start_time,
-                           end_time,
-                           interval_duration);
+                    if (debug) {
+                        printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
+                               start_time,
+                               end_time,
+                               interval_duration);
+                    }
 
                     if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
-                        printf("Match: start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                        candidate_count++;
+                        printf("%u. start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                               candidate_count,
                                start_time,
                                end_time,
                                interval_duration,
                                expected_tone_duration);
-                        candidate_count++;
                     }
 
                     interval_count++;
@@ -411,21 +435,28 @@ int main(int argc, char *argv[]) {
                 double end_time = ((double)window_count * (double)window_samples) / (double)sample_rate;
                 double interval_duration = end_time - start_time;
 
-                printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
-                       start_time,
-                       end_time,
-                       interval_duration);
+                if (debug) {
+                    printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
+                           start_time,
+                           end_time,
+                           interval_duration);
+                }
 
                 if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
-                    printf("Match: start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                    candidate_count++;
+                    printf("%u. start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                           candidate_count,
                            start_time,
                            end_time,
                            interval_duration,
                            expected_tone_duration);
-                    candidate_count++;
                 }
 
                 interval_count++;
+            }
+
+            if (candidate_count == 0) {
+                printf("None\n");
             }
 
             printf("Stats: interval_count=%u candidate_count=%u\n",
