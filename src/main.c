@@ -18,7 +18,7 @@ enum {
 };
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s (-f <file> | -a) [-d]\n", prog);
+    fprintf(stderr, "Usage: %s (-f <file> | -a [--device <name>]) [-d] [--seconds <n>]\n", prog);
 }
 
 // Reads a little-endian 16-bit value; requires at least 2 bytes
@@ -92,6 +92,11 @@ struct detector_state {
 
     double *window_powers;
     int *tone_present;
+
+    int live_stop_enabled;
+    int live_in_interval;
+    uint32_t live_interval_start_index;
+    uint32_t live_candidate_count;
 };
 
 static int read_wav_mono_samples(void *ctx,
@@ -264,7 +269,83 @@ static int detector_init(struct detector_state *state,
     return 0;
 }
 
-static void detector_process_sample(struct detector_state *state, float mono_sample) {
+static int detector_process_live_window(struct detector_state *state, double power) {
+    double avg_power;
+    double threshold;
+    uint32_t current_index;
+    int tone_now;
+    double start_time;
+    double end_time;
+    double interval_duration;
+
+    if (!state->live_stop_enabled) {
+        return 0;
+    }
+
+    current_index = state->window_count - 1;
+    avg_power = state->window_count > 0
+        ? state->sum_power / (double)state->window_count
+        : 0.0;
+    threshold = avg_power;
+    tone_now = power >= threshold;
+
+    if (state->debug) {
+        double window_start = ((double)current_index * (double)state->window_samples)
+                            / (double)state->sample_rate;
+        double window_end = ((double)(current_index + 1) * (double)state->window_samples)
+                          / (double)state->sample_rate;
+        printf("Debug: live_window=%u start=%.3f end=%.3f power=%.6f threshold=%.6f tone=%s\n",
+               current_index,
+               window_start,
+               window_end,
+               power,
+               threshold,
+               tone_now ? "present" : "absent");
+    }
+
+    if (!state->live_in_interval && tone_now) {
+        state->live_in_interval = 1;
+        state->live_interval_start_index = current_index;
+        return 0;
+    }
+
+    if (state->live_in_interval && !tone_now) {
+        start_time = ((double)state->live_interval_start_index * (double)state->window_samples)
+                   / (double)state->sample_rate;
+        end_time = ((double)current_index * (double)state->window_samples)
+                 / (double)state->sample_rate;
+        interval_duration = end_time - start_time;
+
+        if (state->debug) {
+            printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
+                   start_time,
+                   end_time,
+                   interval_duration);
+        }
+
+        state->live_in_interval = 0;
+
+        if (interval_duration >= state->min_match_duration
+                && interval_duration <= state->max_match_duration) {
+            state->live_candidate_count++;
+            printf("WWV 1000 Hz candidate tones:\n");
+            printf("%u. start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
+                   state->live_candidate_count,
+                   start_time,
+                   end_time,
+                   interval_duration,
+                   state->expected_tone_duration);
+            printf("Stats: interval_count=%u candidate_count=%u\n",
+                   state->live_candidate_count,
+                   state->live_candidate_count);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int detector_process_sample(struct detector_state *state, float mono_sample) {
     state->q0 = state->coeff * state->q1 - state->q2 + mono_sample;
     state->q2 = state->q1;
     state->q1 = state->q0;
@@ -293,15 +374,25 @@ static void detector_process_sample(struct detector_state *state, float mono_sam
         state->q1 = 0.0;
         state->q2 = 0.0;
         state->window_index = 0;
+
+        if (detector_process_live_window(state, power) != 0) {
+            return 1;
+        }
     }
+
+    return 0;
 }
 
-static void detector_process_samples(struct detector_state *state,
-                                     const float *mono_samples,
-                                     uint32_t sample_count) {
+static int detector_process_samples(struct detector_state *state,
+                                    const float *mono_samples,
+                                    uint32_t sample_count) {
     for (uint32_t i = 0; i < sample_count; i++) {
-        detector_process_sample(state, mono_samples[i]);
+        if (detector_process_sample(state, mono_samples[i]) != 0) {
+            return 1;
+        }
     }
+
+    return 0;
 }
 
 static int detector_finish(struct detector_state *state) {
@@ -431,7 +522,8 @@ static int analyze_sample_stream(sample_reader_fn reader,
                                  uint16_t num_channels,
                                  uint32_t sample_rate,
                                  uint16_t bits_per_sample,
-                                 int debug) {
+                                 int debug,
+                                 int live_stop_enabled) {
     struct detector_state state;
     float mono_samples[SAMPLE_BUFFER_FRAMES];
     uint64_t frames_remaining = total_frames;
@@ -444,6 +536,8 @@ static int analyze_sample_stream(sample_reader_fn reader,
                       debug) != 0) {
         return 1;
     }
+
+    state.live_stop_enabled = live_stop_enabled;
 
     while (frames_remaining > 0) {
         uint32_t chunk_frames = frames_remaining > SAMPLE_BUFFER_FRAMES
@@ -460,7 +554,11 @@ static int analyze_sample_stream(sample_reader_fn reader,
             return 1;
         }
 
-        detector_process_samples(&state, mono_samples, chunk_frames);
+        if (detector_process_samples(&state, mono_samples, chunk_frames) != 0) {
+            detector_cleanup(&state);
+            return 0;
+        }
+
         frames_remaining -= chunk_frames;
     }
 
@@ -502,11 +600,11 @@ static int analyze_wav_pcm(FILE *fp,
                                  num_channels,
                                  sample_rate,
                                  bits_per_sample,
-                                 debug);
+                                 debug,
+                                 0);
 }
 
-static int analyze_alsa_pcm(int debug) {
-    const char *device_name = "default";
+static int analyze_alsa_pcm(const char *device_name, uint32_t capture_seconds, int debug) {
     snd_pcm_t *pcm = NULL;
     snd_pcm_hw_params_t *hw_params = NULL;
     struct alsa_sample_reader reader;
@@ -515,7 +613,7 @@ static int analyze_alsa_pcm(int debug) {
     uint16_t num_channels = 1;
     unsigned int actual_channels = 0;
     uint16_t bits_per_sample = 16;
-    uint64_t total_frames = (uint64_t)sample_rate * DEFAULT_ALSA_CAPTURE_SECONDS;
+    uint64_t total_frames = (uint64_t)sample_rate * capture_seconds;
     int err;
 
     err = snd_pcm_open(&pcm, device_name, SND_PCM_STREAM_CAPTURE, 0);
@@ -594,8 +692,8 @@ static int analyze_alsa_pcm(int debug) {
 
     if (debug) {
         printf("Debug: ALSA hw params confirmed\n");
-        printf("Debug: rate=%u channels=%u format=S16_LE\n",
-               actual_rate, actual_channels);
+        printf("Debug: device=%s rate=%u channels=%u format=S16_LE\n",
+               device_name, actual_rate, actual_channels);
     }
 
     err = snd_pcm_prepare(pcm);
@@ -609,7 +707,7 @@ static int analyze_alsa_pcm(int debug) {
     if (debug) {
         printf("Debug: opened ALSA capture device: %s\n", device_name);
         printf("Debug: capture_seconds=%u total_frames=%llu\n",
-               DEFAULT_ALSA_CAPTURE_SECONDS,
+               capture_seconds,
                (unsigned long long)total_frames);
     }
 
@@ -623,7 +721,8 @@ static int analyze_alsa_pcm(int debug) {
                                 num_channels,
                                 sample_rate,
                                 bits_per_sample,
-                                debug);
+                                debug,
+                                1);
 
     snd_pcm_close(pcm);
     return err;
@@ -631,6 +730,7 @@ static int analyze_alsa_pcm(int debug) {
 
 int main(int argc, char *argv[]) {
     const char *file_path = NULL;
+    const char *alsa_device = "default";
     unsigned char header[12];
     unsigned char chunk_header[RIFF_CHUNK_HEADER_SIZE];
     unsigned char fmt_data[16];
@@ -644,23 +744,32 @@ int main(int argc, char *argv[]) {
     uint16_t bits_per_sample = 0;
     uint32_t data_chunk_size = 0;
     long data_chunk_offset = 0;
+    uint32_t capture_seconds = DEFAULT_ALSA_CAPTURE_SECONDS;
 
     static struct option long_options[] = {
         {"file", required_argument, 0, 'f'},
         {"alsa", no_argument, 0, 'a'},
+        {"device", required_argument, 0, 'D'},
+        {"seconds", required_argument, 0, 's'},
         {"help", no_argument, 0, 'h'},
         {"debug", no_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "f:ahd", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "f:aD:s:hd", long_options, NULL)) != -1) {
         switch (opt) {
             case 'f':
                 file_path = optarg;
                 break;
             case 'a':
                 use_alsa = 1;
+                break;
+            case 'D':
+                alsa_device = optarg;
+                break;
+            case 's':
+                capture_seconds = (uint32_t)strtoul(optarg, NULL, 10);
                 break;
             case 'd':
                 debug = 1;
@@ -680,7 +789,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (use_alsa) {
-        return analyze_alsa_pcm(debug);
+        if (capture_seconds == 0) {
+            fprintf(stderr, "Error: capture seconds must be greater than zero\n");
+            return 1;
+        }
+
+        return analyze_alsa_pcm(alsa_device, capture_seconds, debug);
     }
 
     FILE *fp = fopen(file_path, "rb");
