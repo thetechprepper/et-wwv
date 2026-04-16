@@ -28,6 +28,49 @@ static uint32_t read_le32(const unsigned char *buf) {
          | ((uint32_t)buf[3] << 24);
 }
 
+static int read_wav_mono_sample(FILE *fp,
+                                uint16_t num_channels,
+                                uint16_t bits_per_sample,
+                                float *mono_sample,
+                                float *min_sample,
+                                float *max_sample) {
+    uint32_t bytes_per_sample = bits_per_sample / 8;
+    unsigned char sample_buf[4];
+    float sum = 0.0f;
+
+    for (uint16_t channel = 0; channel < num_channels; channel++) {
+        float sample_value = 0.0f;
+
+        if (fread(sample_buf, 1, bytes_per_sample, fp) != bytes_per_sample) {
+            return 1;
+        }
+
+        if (bits_per_sample == 8) {
+            uint8_t s = sample_buf[0];
+            sample_value = ((float)s - 128.0f) / 128.0f;
+        } else if (bits_per_sample == 16) {
+            int16_t s = (int16_t)read_le16(sample_buf);
+            sample_value = (float)s / 32768.0f;
+        } else if (bits_per_sample == 32) {
+            int32_t s = (int32_t)read_le32(sample_buf);
+            sample_value = (float)s / 2147483648.0f;
+        }
+
+        if (sample_value < *min_sample) {
+            *min_sample = sample_value;
+        }
+
+        if (sample_value > *max_sample) {
+            *max_sample = sample_value;
+        }
+
+        sum += sample_value;
+    }
+
+    *mono_sample = sum / (float)num_channels;
+    return 0;
+}
+
 static int analyze_wav_pcm(FILE *fp,
                            long data_chunk_offset,
                            uint32_t data_chunk_size,
@@ -42,7 +85,6 @@ static int analyze_wav_pcm(FILE *fp,
     double duration_seconds = 0.0;
     float min_sample = 1.0f;
     float max_sample = -1.0f;
-    unsigned char sample_buf[4];
     const double target_freq = 1000.0;
     const uint32_t window_ms = 10;
     const double expected_tone_duration = 0.8;
@@ -123,39 +165,17 @@ static int analyze_wav_pcm(FILE *fp,
     for (uint64_t frame = 0; frame < total_frames; frame++) {
         float mono_sample = 0.0f;
 
-        for (uint16_t channel = 0; channel < num_channels; channel++) {
-            float sample_value = 0.0f;
-
-            if (fread(sample_buf, 1, bytes_per_sample, fp) != bytes_per_sample) {
-                fprintf(stderr, "Error: could not read PCM sample data\n");
-                free(tone_present);
-                free(window_powers);
-                return 1;
-            }
-
-            if (bits_per_sample == 8) {
-                uint8_t s = sample_buf[0];
-                sample_value = ((float)s - 128.0f) / 128.0f;
-            } else if (bits_per_sample == 16) {
-                int16_t s = (int16_t)read_le16(sample_buf);
-                sample_value = (float)s / 32768.0f;
-            } else if (bits_per_sample == 32) {
-                int32_t s = (int32_t)read_le32(sample_buf);
-                sample_value = (float)s / 2147483648.0f;
-            }
-
-            if (sample_value < min_sample) {
-                min_sample = sample_value;
-            }
-
-            if (sample_value > max_sample) {
-                max_sample = sample_value;
-            }
-
-            mono_sample += sample_value;
+        if (read_wav_mono_sample(fp,
+                                 num_channels,
+                                 bits_per_sample,
+                                 &mono_sample,
+                                 &min_sample,
+                                 &max_sample) != 0) {
+            fprintf(stderr, "Error: could not read PCM sample data\n");
+            free(tone_present);
+            free(window_powers);
+            return 1;
         }
-
-        mono_sample /= (float)num_channels;
 
         q0 = coeff * q1 - q2 + mono_sample;
         q2 = q1;
