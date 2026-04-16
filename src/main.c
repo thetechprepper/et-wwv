@@ -87,6 +87,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Verify RIFF container and WAVE type (first 12 bytes only)
+    // This is a lightweight sanity check, not a full WAV parser.
     if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
         fprintf(stderr, "Error: not a valid WAV file: %s\n", file_path);
         fclose(fp);
