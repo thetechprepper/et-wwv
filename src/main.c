@@ -39,6 +39,48 @@ struct wav_sample_reader {
     uint16_t bits_per_sample;
 };
 
+struct detector_state {
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint16_t bits_per_sample;
+    int debug;
+
+    uint32_t bytes_per_sample;
+    uint32_t frame_size;
+    uint64_t total_frames;
+    uint64_t total_samples;
+    double duration_seconds;
+
+    float min_sample;
+    float max_sample;
+
+    double target_freq;
+    uint32_t window_ms;
+    double expected_tone_duration;
+    double min_match_duration;
+    double max_match_duration;
+    uint32_t window_samples;
+
+    double k;
+    double omega;
+    double coeff;
+    double q0;
+    double q1;
+    double q2;
+
+    uint32_t window_index;
+    uint32_t window_count;
+    uint32_t estimated_window_count;
+
+    double min_power;
+    double max_power;
+    double sum_power;
+    double threshold;
+
+    double *window_powers;
+    int *tone_present;
+};
+
 static int read_wav_mono_sample(void *ctx,
                                 float *mono_sample,
                                 float *min_sample,
@@ -81,158 +123,149 @@ static int read_wav_mono_sample(void *ctx,
     return 0;
 }
 
-static int analyze_sample_stream(sample_reader_fn reader,
-                                 void *reader_ctx,
-                                 uint64_t total_frames,
-                                 uint16_t num_channels,
-                                 uint32_t sample_rate,
-                                 uint16_t bits_per_sample,
-                                 int debug) {
-    uint32_t bytes_per_sample = bits_per_sample / 8;
-    uint32_t frame_size = num_channels * bytes_per_sample;
-    uint64_t total_samples = 0;
-    double duration_seconds = 0.0;
-    float min_sample = 1.0f;
-    float max_sample = -1.0f;
-    const double target_freq = 1000.0;
-    const uint32_t window_ms = 10;
-    const double expected_tone_duration = 0.8;
-    const double min_match_duration = 0.6;
-    const double max_match_duration = 1.0;
-    uint32_t window_samples = (sample_rate * window_ms) / 1000;
-    double k;
-    double omega;
-    double coeff;
-    double q0 = 0.0;
-    double q1 = 0.0;
-    double q2 = 0.0;
-    uint32_t window_index = 0;
-    uint32_t window_count = 0;
-    uint32_t estimated_window_count = 0;
-    double min_power = -1.0;
-    double max_power = -1.0;
-    double sum_power = 0.0;
-    double threshold = 0.0;
-    double *window_powers = NULL;
-    int *tone_present = NULL;
+static int detector_init(struct detector_state *state,
+                         uint64_t total_frames,
+                         uint16_t num_channels,
+                         uint32_t sample_rate,
+                         uint16_t bits_per_sample,
+                         int debug) {
+    memset(state, 0, sizeof(*state));
 
-    if (frame_size == 0) {
+    state->num_channels = num_channels;
+    state->sample_rate = sample_rate;
+    state->bits_per_sample = bits_per_sample;
+    state->debug = debug;
+
+    state->bytes_per_sample = bits_per_sample / 8;
+    state->frame_size = num_channels * state->bytes_per_sample;
+    state->total_frames = total_frames;
+    state->total_samples = total_frames * num_channels;
+    state->duration_seconds = (double)total_frames / (double)sample_rate;
+
+    state->min_sample = 1.0f;
+    state->max_sample = -1.0f;
+
+    state->target_freq = 1000.0;
+    state->window_ms = 10;
+    state->expected_tone_duration = 0.8;
+    state->min_match_duration = 0.6;
+    state->max_match_duration = 1.0;
+    state->window_samples = (sample_rate * state->window_ms) / 1000;
+
+    state->min_power = -1.0;
+    state->max_power = -1.0;
+
+    if (state->frame_size == 0) {
         fprintf(stderr, "Error: invalid frame size\n");
         return 1;
     }
 
-    if (window_samples == 0) {
-        window_samples = 1;
+    if (state->window_samples == 0) {
+        state->window_samples = 1;
     }
 
-    total_samples = total_frames * num_channels;
-    duration_seconds = (double)total_frames / (double)sample_rate;
-
-    estimated_window_count = (uint32_t)(total_frames / window_samples);
-    if (estimated_window_count == 0) {
-        estimated_window_count = 1;
+    state->estimated_window_count = (uint32_t)(total_frames / state->window_samples);
+    if (state->estimated_window_count == 0) {
+        state->estimated_window_count = 1;
     }
 
-    window_powers = malloc(sizeof(double) * estimated_window_count);
-    if (window_powers == NULL) {
+    state->window_powers = malloc(sizeof(double) * state->estimated_window_count);
+    if (state->window_powers == NULL) {
         fprintf(stderr, "Error: memory allocation failed\n");
         return 1;
     }
 
-    tone_present = malloc(sizeof(int) * estimated_window_count);
-    if (tone_present == NULL) {
+    state->tone_present = malloc(sizeof(int) * state->estimated_window_count);
+    if (state->tone_present == NULL) {
         fprintf(stderr, "Error: memory allocation failed\n");
-        free(window_powers);
+        free(state->window_powers);
+        state->window_powers = NULL;
         return 1;
     }
 
-    k = 0.5 + ((double)window_samples * target_freq / (double)sample_rate);
-    omega = (2.0 * M_PI * k) / (double)window_samples;
-    coeff = 2.0 * cos(omega);
+    state->k = 0.5 + ((double)state->window_samples * state->target_freq / (double)sample_rate);
+    state->omega = (2.0 * M_PI * state->k) / (double)state->window_samples;
+    state->coeff = 2.0 * cos(state->omega);
 
-    if (debug) {
+    if (state->debug) {
         printf("Debug: beginning PCM sample read\n");
         printf("Debug: bytes_per_sample=%u frame_size=%u total_frames=%llu total_samples=%llu\n",
-               bytes_per_sample,
-               frame_size,
-               (unsigned long long)total_frames,
-               (unsigned long long)total_samples);
+               state->bytes_per_sample,
+               state->frame_size,
+               (unsigned long long)state->total_frames,
+               (unsigned long long)state->total_samples);
         printf("Debug: window_ms=%u window_samples=%u target_freq=%.1f\n",
-               window_ms,
-               window_samples,
-               target_freq);
+               state->window_ms,
+               state->window_samples,
+               state->target_freq);
     }
 
-    for (uint64_t frame = 0; frame < total_frames; frame++) {
-        float mono_sample = 0.0f;
+    return 0;
+}
 
-        if (reader(reader_ctx,
-                   &mono_sample,
-                   &min_sample,
-                   &max_sample) != 0) {
-            fprintf(stderr, "Error: could not read PCM sample data\n");
-            free(tone_present);
-            free(window_powers);
-            return 1;
+static void detector_process_sample(struct detector_state *state, float mono_sample) {
+    state->q0 = state->coeff * state->q1 - state->q2 + mono_sample;
+    state->q2 = state->q1;
+    state->q1 = state->q0;
+    state->window_index++;
+
+    if (state->window_index == state->window_samples) {
+        double power = state->q1 * state->q1 + state->q2 * state->q2
+                     - state->coeff * state->q1 * state->q2;
+
+        if (state->window_count < state->estimated_window_count) {
+            state->window_powers[state->window_count] = power;
         }
 
-        q0 = coeff * q1 - q2 + mono_sample;
-        q2 = q1;
-        q1 = q0;
-        window_index++;
-
-        if (window_index == window_samples) {
-            double power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
-
-            if (window_count < estimated_window_count) {
-                window_powers[window_count] = power;
-            }
-
-            if (min_power < 0.0 || power < min_power) {
-                min_power = power;
-            }
-
-            if (max_power < 0.0 || power > max_power) {
-                max_power = power;
-            }
-
-            sum_power += power;
-            window_count++;
-
-            q0 = 0.0;
-            q1 = 0.0;
-            q2 = 0.0;
-            window_index = 0;
+        if (state->min_power < 0.0 || power < state->min_power) {
+            state->min_power = power;
         }
+
+        if (state->max_power < 0.0 || power > state->max_power) {
+            state->max_power = power;
+        }
+
+        state->sum_power += power;
+        state->window_count++;
+
+        state->q0 = 0.0;
+        state->q1 = 0.0;
+        state->q2 = 0.0;
+        state->window_index = 0;
     }
+}
 
-    threshold = window_count > 0 ? (sum_power / (double)window_count) : 0.0;
+static int detector_finish(struct detector_state *state) {
+    state->threshold = state->window_count > 0
+        ? (state->sum_power / (double)state->window_count)
+        : 0.0;
 
-    if (debug) {
+    if (state->debug) {
         printf("Debug: PCM sample read complete\n");
-        printf("Stats: duration_seconds=%.3f\n", duration_seconds);
-        printf("Stats: min_sample=%.6f max_sample=%.6f\n", min_sample, max_sample);
+        printf("Stats: duration_seconds=%.3f\n", state->duration_seconds);
+        printf("Stats: min_sample=%.6f max_sample=%.6f\n",
+               state->min_sample, state->max_sample);
         printf("Stats: window_count=%u min_power=%.6f max_power=%.6f avg_power=%.6f threshold=%.6f\n",
-               window_count,
-               min_power,
-               max_power,
-               window_count > 0 ? sum_power / (double)window_count : 0.0,
-               threshold);
+               state->window_count,
+               state->min_power,
+               state->max_power,
+               state->window_count > 0 ? state->sum_power / (double)state->window_count : 0.0,
+               state->threshold);
     }
 
-    for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
-        double window_start = ((double)i * (double)window_samples) / (double)sample_rate;
-        double window_end = ((double)(i + 1) * (double)window_samples) / (double)sample_rate;
+    for (uint32_t i = 0; i < state->window_count && i < state->estimated_window_count; i++) {
+        double window_start = ((double)i * (double)state->window_samples) / (double)state->sample_rate;
+        double window_end = ((double)(i + 1) * (double)state->window_samples) / (double)state->sample_rate;
 
-        tone_present[i] = window_powers[i] >= threshold;
+        state->tone_present[i] = state->window_powers[i] >= state->threshold;
 
-        if (debug) {
+        if (state->debug) {
             printf("Debug: window=%u start=%.3f end=%.3f power=%.6f tone=%s\n",
                    i,
                    window_start,
                    window_end,
-                   window_powers[i],
-                   tone_present[i] ? "present" : "absent");
+                   state->window_powers[i],
+                   state->tone_present[i] ? "present" : "absent");
         }
     }
 
@@ -244,30 +277,33 @@ static int analyze_sample_stream(sample_reader_fn reader,
 
         printf("WWV 1000 Hz candidate tones:\n");
 
-        for (uint32_t i = 0; i < window_count && i < estimated_window_count; i++) {
-            if (!in_interval && tone_present[i]) {
+        for (uint32_t i = 0; i < state->window_count && i < state->estimated_window_count; i++) {
+            if (!in_interval && state->tone_present[i]) {
                 in_interval = 1;
                 interval_start_index = i;
-            } else if (in_interval && !tone_present[i]) {
-                double start_time = ((double)interval_start_index * (double)window_samples) / (double)sample_rate;
-                double end_time = ((double)i * (double)window_samples) / (double)sample_rate;
+            } else if (in_interval && !state->tone_present[i]) {
+                double start_time = ((double)interval_start_index * (double)state->window_samples)
+                                  / (double)state->sample_rate;
+                double end_time = ((double)i * (double)state->window_samples)
+                                / (double)state->sample_rate;
                 double interval_duration = end_time - start_time;
 
-                if (debug) {
+                if (state->debug) {
                     printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
                            start_time,
                            end_time,
                            interval_duration);
                 }
 
-                if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
+                if (interval_duration >= state->min_match_duration
+                        && interval_duration <= state->max_match_duration) {
                     candidate_count++;
                     printf("%u. start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
                            candidate_count,
                            start_time,
                            end_time,
                            interval_duration,
-                           expected_tone_duration);
+                           state->expected_tone_duration);
                 }
 
                 interval_count++;
@@ -276,25 +312,28 @@ static int analyze_sample_stream(sample_reader_fn reader,
         }
 
         if (in_interval) {
-            double start_time = ((double)interval_start_index * (double)window_samples) / (double)sample_rate;
-            double end_time = ((double)window_count * (double)window_samples) / (double)sample_rate;
+            double start_time = ((double)interval_start_index * (double)state->window_samples)
+                              / (double)state->sample_rate;
+            double end_time = ((double)state->window_count * (double)state->window_samples)
+                            / (double)state->sample_rate;
             double interval_duration = end_time - start_time;
 
-            if (debug) {
+            if (state->debug) {
                 printf("Interval: start=%.3f end=%.3f duration=%.3f\n",
                        start_time,
                        end_time,
                        interval_duration);
             }
 
-            if (interval_duration >= min_match_duration && interval_duration <= max_match_duration) {
+            if (interval_duration >= state->min_match_duration
+                    && interval_duration <= state->max_match_duration) {
                 candidate_count++;
                 printf("%u. start=%.3f end=%.3f duration=%.3f expected=%.3f\n",
                        candidate_count,
                        start_time,
                        end_time,
                        interval_duration,
-                       expected_tone_duration);
+                       state->expected_tone_duration);
             }
 
             interval_count++;
@@ -309,8 +348,53 @@ static int analyze_sample_stream(sample_reader_fn reader,
                candidate_count);
     }
 
-    free(tone_present);
-    free(window_powers);
+    return 0;
+}
+
+static void detector_cleanup(struct detector_state *state) {
+    free(state->tone_present);
+    free(state->window_powers);
+}
+
+static int analyze_sample_stream(sample_reader_fn reader,
+                                 void *reader_ctx,
+                                 uint64_t total_frames,
+                                 uint16_t num_channels,
+                                 uint32_t sample_rate,
+                                 uint16_t bits_per_sample,
+                                 int debug) {
+    struct detector_state state;
+
+    if (detector_init(&state,
+                      total_frames,
+                      num_channels,
+                      sample_rate,
+                      bits_per_sample,
+                      debug) != 0) {
+        return 1;
+    }
+
+    for (uint64_t frame = 0; frame < total_frames; frame++) {
+        float mono_sample = 0.0f;
+
+        if (reader(reader_ctx,
+                   &mono_sample,
+                   &state.min_sample,
+                   &state.max_sample) != 0) {
+            fprintf(stderr, "Error: could not read PCM sample data\n");
+            detector_cleanup(&state);
+            return 1;
+        }
+
+        detector_process_sample(&state, mono_sample);
+    }
+
+    if (detector_finish(&state) != 0) {
+        detector_cleanup(&state);
+        return 1;
+    }
+
+    detector_cleanup(&state);
     return 0;
 }
 
