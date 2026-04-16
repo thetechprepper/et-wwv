@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // POSIX / GNU
 #include <getopt.h>
@@ -97,7 +98,65 @@ struct detector_state {
     int live_in_interval;
     uint32_t live_interval_start_index;
     uint32_t live_candidate_count;
+
+    int set_clock_enabled;
+    struct timespec target_time;
 };
+
+static void print_local_time(const char *label, time_t t) {
+    struct tm tm_buf;
+    char time_buf[64];
+
+    if (localtime_r(&t, &tm_buf) == NULL) {
+        fprintf(stderr, "Error: could not convert local time\n");
+        return;
+    }
+
+    if (strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S %Z", &tm_buf) == 0) {
+        fprintf(stderr, "Error: could not format local time\n");
+        return;
+    }
+
+    printf("%s: %s\n", label, time_buf);
+}
+
+static int get_next_minute_time(struct timespec *ts) {
+    time_t now;
+    struct tm tm_buf;
+
+    now = time(NULL);
+    if (now == (time_t)-1) {
+        fprintf(stderr, "Error: could not read current time\n");
+        return 1;
+    }
+
+    if (localtime_r(&now, &tm_buf) == NULL) {
+        fprintf(stderr, "Error: could not convert current time\n");
+        return 1;
+    }
+
+    tm_buf.tm_sec = 0;
+    tm_buf.tm_min += 1;
+
+    ts->tv_sec = mktime(&tm_buf);
+    ts->tv_nsec = 0;
+
+    if (ts->tv_sec == (time_t)-1) {
+        fprintf(stderr, "Error: could not calculate target time\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int set_system_time(const struct timespec *ts) {
+    if (clock_settime(CLOCK_REALTIME, ts) != 0) {
+        fprintf(stderr, "Error: could not set system clock: %s\n", strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
 
 static int read_wav_mono_samples(void *ctx,
                                  float *mono_samples,
@@ -335,6 +394,16 @@ static int detector_process_live_window(struct detector_state *state, double pow
                    end_time,
                    interval_duration,
                    state->expected_tone_duration);
+
+            if (state->set_clock_enabled) {
+                print_local_time("Current system time", state->target_time.tv_sec - 60);
+                print_local_time("Setting system time", state->target_time.tv_sec);
+
+                if (set_system_time(&state->target_time) != 0) {
+                    return -1;
+                }
+            }
+
             printf("Stats: interval_count=%u candidate_count=%u\n",
                    state->live_candidate_count,
                    state->live_candidate_count);
@@ -375,9 +444,7 @@ static int detector_process_sample(struct detector_state *state, float mono_samp
         state->q2 = 0.0;
         state->window_index = 0;
 
-        if (detector_process_live_window(state, power) != 0) {
-            return 1;
-        }
+        return detector_process_live_window(state, power);
     }
 
     return 0;
@@ -387,8 +454,9 @@ static int detector_process_samples(struct detector_state *state,
                                     const float *mono_samples,
                                     uint32_t sample_count) {
     for (uint32_t i = 0; i < sample_count; i++) {
-        if (detector_process_sample(state, mono_samples[i]) != 0) {
-            return 1;
+        int rc = detector_process_sample(state, mono_samples[i]);
+        if (rc != 0) {
+            return rc;
         }
     }
 
@@ -523,7 +591,8 @@ static int analyze_sample_stream(sample_reader_fn reader,
                                  uint32_t sample_rate,
                                  uint16_t bits_per_sample,
                                  int debug,
-                                 int live_stop_enabled) {
+                                 int live_stop_enabled,
+                                 const struct timespec *target_time) {
     struct detector_state state;
     float mono_samples[SAMPLE_BUFFER_FRAMES];
     uint64_t frames_remaining = total_frames;
@@ -538,6 +607,11 @@ static int analyze_sample_stream(sample_reader_fn reader,
     }
 
     state.live_stop_enabled = live_stop_enabled;
+
+    if (target_time != NULL) {
+        state.set_clock_enabled = 1;
+        state.target_time = *target_time;
+    }
 
     while (frames_remaining > 0) {
         uint32_t chunk_frames = frames_remaining > SAMPLE_BUFFER_FRAMES
@@ -554,9 +628,17 @@ static int analyze_sample_stream(sample_reader_fn reader,
             return 1;
         }
 
-        if (detector_process_samples(&state, mono_samples, chunk_frames) != 0) {
-            detector_cleanup(&state);
-            return 0;
+        {
+            int rc = detector_process_samples(&state, mono_samples, chunk_frames);
+            if (rc > 0) {
+                detector_cleanup(&state);
+                return 0;
+            }
+
+            if (rc < 0) {
+                detector_cleanup(&state);
+                return 1;
+            }
         }
 
         frames_remaining -= chunk_frames;
@@ -601,13 +683,15 @@ static int analyze_wav_pcm(FILE *fp,
                                  sample_rate,
                                  bits_per_sample,
                                  debug,
-                                 0);
+                                 0,
+                                 NULL);
 }
 
 static int analyze_alsa_pcm(const char *device_name, uint32_t capture_seconds, int debug) {
     snd_pcm_t *pcm = NULL;
     snd_pcm_hw_params_t *hw_params = NULL;
     struct alsa_sample_reader reader;
+    struct timespec target_time;
     uint32_t sample_rate = 48000;
     uint32_t actual_rate = 0;
     uint16_t num_channels = 1;
@@ -615,6 +699,21 @@ static int analyze_alsa_pcm(const char *device_name, uint32_t capture_seconds, i
     uint16_t bits_per_sample = 16;
     uint64_t total_frames = (uint64_t)sample_rate * capture_seconds;
     int err;
+    time_t start_time;
+
+    start_time = time(NULL);
+    if (start_time == (time_t)-1) {
+        fprintf(stderr, "Error: could not read current time\n");
+        return 1;
+    }
+
+    print_local_time("Current system time", start_time);
+
+    if (get_next_minute_time(&target_time) != 0) {
+        return 1;
+    }
+
+    print_local_time("Target system time", target_time.tv_sec);
 
     err = snd_pcm_open(&pcm, device_name, SND_PCM_STREAM_CAPTURE, 0);
     if (err < 0) {
@@ -722,7 +821,8 @@ static int analyze_alsa_pcm(const char *device_name, uint32_t capture_seconds, i
                                 sample_rate,
                                 bits_per_sample,
                                 debug,
-                                1);
+                                1,
+                                &target_time);
 
     snd_pcm_close(pcm);
     return err;
