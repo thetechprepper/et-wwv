@@ -511,7 +511,9 @@ static int analyze_alsa_pcm(int debug) {
     snd_pcm_hw_params_t *hw_params = NULL;
     struct alsa_sample_reader reader;
     uint32_t sample_rate = 48000;
+    uint32_t actual_rate = 0;
     uint16_t num_channels = 1;
+    unsigned int actual_channels = 0;
     uint16_t bits_per_sample = 16;
     uint64_t total_frames = (uint64_t)sample_rate * DEFAULT_ALSA_CAPTURE_SECONDS;
     int err;
@@ -573,6 +575,29 @@ static int analyze_alsa_pcm(int debug) {
         return 1;
     }
 
+    snd_pcm_hw_params_get_rate(hw_params, &actual_rate, NULL);
+    snd_pcm_hw_params_get_channels(hw_params, &actual_channels);
+
+    if (actual_rate != sample_rate) {
+        fprintf(stderr, "Error: ALSA rate mismatch (requested=%u actual=%u)\n",
+                sample_rate, actual_rate);
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    if (actual_channels != num_channels) {
+        fprintf(stderr, "Error: ALSA channel mismatch (requested=%u actual=%u)\n",
+                num_channels, actual_channels);
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    if (debug) {
+        printf("Debug: ALSA hw params confirmed\n");
+        printf("Debug: rate=%u channels=%u format=S16_LE\n",
+               actual_rate, actual_channels);
+    }
+
     err = snd_pcm_prepare(pcm);
     if (err < 0) {
         fprintf(stderr, "Error: could not prepare ALSA device: %s\n",
@@ -583,11 +608,9 @@ static int analyze_alsa_pcm(int debug) {
 
     if (debug) {
         printf("Debug: opened ALSA capture device: %s\n", device_name);
-        printf("Debug: sample_rate=%u channels=%u bits_per_sample=%u capture_seconds=%u\n",
-               sample_rate,
-               num_channels,
-               bits_per_sample,
-               DEFAULT_ALSA_CAPTURE_SECONDS);
+        printf("Debug: capture_seconds=%u total_frames=%llu\n",
+               DEFAULT_ALSA_CAPTURE_SECONDS,
+               (unsigned long long)total_frames);
     }
 
     reader.pcm = pcm;
