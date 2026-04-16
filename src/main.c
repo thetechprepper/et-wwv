@@ -15,12 +15,12 @@ static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
 }
 
-// Reads a little-endian 16-bit value from buf (requires at least 2 bytes)
+// Reads a little-endian 16-bit value; requires at least 2 bytes
 static uint16_t read_le16(const unsigned char *buf) {
     return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 }
 
-// Reads a little-endian 32-bit value from buf (requires at least 4 bytes)
+// Reads a little-endian 32-bit value; requires at least 4 bytes
 static uint32_t read_le32(const unsigned char *buf) {
     return (uint32_t)buf[0]
          | ((uint32_t)buf[1] << 8)
@@ -87,7 +87,6 @@ int main(int argc, char *argv[]) {
     if (fread(header, 1, sizeof(header), fp) != sizeof(header)) {
         fprintf(stderr, "Error: could not read WAV header: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
@@ -96,7 +95,6 @@ int main(int argc, char *argv[]) {
     if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
         fprintf(stderr, "Error: not a valid WAV file: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
@@ -112,14 +110,12 @@ int main(int argc, char *argv[]) {
             if (chunk_size < 16) {
                 fprintf(stderr, "Error: invalid fmt chunk: %s\n", file_path);
                 fclose(fp);
-                usage(argv[0]);
                 return 1;
             }
 
             if (fread(fmt_data, 1, sizeof(fmt_data), fp) != sizeof(fmt_data)) {
                 fprintf(stderr, "Error: could not read fmt chunk: %s\n", file_path);
                 fclose(fp);
-                usage(argv[0]);
                 return 1;
             }
 
@@ -139,7 +135,6 @@ int main(int argc, char *argv[]) {
                 if (fseek(fp, chunk_size - 16, SEEK_CUR) != 0) {
                     fprintf(stderr, "Error: could not skip fmt extension: %s\n", file_path);
                     fclose(fp);
-                    usage(argv[0]);
                     return 1;
                 }
             }
@@ -158,7 +153,6 @@ int main(int argc, char *argv[]) {
             if (fseek(fp, chunk_size, SEEK_CUR) != 0) {
                 fprintf(stderr, "Error: could not skip chunk: %s\n", file_path);
                 fclose(fp);
-                usage(argv[0]);
                 return 1;
             }
         }
@@ -167,7 +161,6 @@ int main(int argc, char *argv[]) {
             if (fseek(fp, 1, SEEK_CUR) != 0) {
                 fprintf(stderr, "Error: could not skip chunk padding: %s\n", file_path);
                 fclose(fp);
-                usage(argv[0]);
                 return 1;
             }
         }
@@ -176,21 +169,18 @@ int main(int argc, char *argv[]) {
     if (!found_fmt) {
         fprintf(stderr, "Error: fmt chunk not found: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
     if (!found_data) {
         fprintf(stderr, "Error: data chunk not found: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
     if (audio_format != 1) {
         fprintf(stderr, "Error: unsupported WAV format: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
@@ -203,7 +193,6 @@ int main(int argc, char *argv[]) {
     if (num_channels == 0 || sample_rate == 0 || bits_per_sample == 0) {
         fprintf(stderr, "Error: invalid WAV format values: %s\n", file_path);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
