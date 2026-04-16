@@ -28,30 +28,40 @@ static uint32_t read_le32(const unsigned char *buf) {
          | ((uint32_t)buf[3] << 24);
 }
 
-static int read_wav_mono_sample(FILE *fp,
-                                uint16_t num_channels,
-                                uint16_t bits_per_sample,
+typedef int (*sample_reader_fn)(void *ctx,
+                                float *mono_sample,
+                                float *min_sample,
+                                float *max_sample);
+
+struct wav_sample_reader {
+    FILE *fp;
+    uint16_t num_channels;
+    uint16_t bits_per_sample;
+};
+
+static int read_wav_mono_sample(void *ctx,
                                 float *mono_sample,
                                 float *min_sample,
                                 float *max_sample) {
-    uint32_t bytes_per_sample = bits_per_sample / 8;
+    struct wav_sample_reader *reader = (struct wav_sample_reader *)ctx;
+    uint32_t bytes_per_sample = reader->bits_per_sample / 8;
     unsigned char sample_buf[4];
     float sum = 0.0f;
 
-    for (uint16_t channel = 0; channel < num_channels; channel++) {
+    for (uint16_t channel = 0; channel < reader->num_channels; channel++) {
         float sample_value = 0.0f;
 
-        if (fread(sample_buf, 1, bytes_per_sample, fp) != bytes_per_sample) {
+        if (fread(sample_buf, 1, bytes_per_sample, reader->fp) != bytes_per_sample) {
             return 1;
         }
 
-        if (bits_per_sample == 8) {
+        if (reader->bits_per_sample == 8) {
             uint8_t s = sample_buf[0];
             sample_value = ((float)s - 128.0f) / 128.0f;
-        } else if (bits_per_sample == 16) {
+        } else if (reader->bits_per_sample == 16) {
             int16_t s = (int16_t)read_le16(sample_buf);
             sample_value = (float)s / 32768.0f;
-        } else if (bits_per_sample == 32) {
+        } else if (reader->bits_per_sample == 32) {
             int32_t s = (int32_t)read_le32(sample_buf);
             sample_value = (float)s / 2147483648.0f;
         }
@@ -67,20 +77,19 @@ static int read_wav_mono_sample(FILE *fp,
         sum += sample_value;
     }
 
-    *mono_sample = sum / (float)num_channels;
+    *mono_sample = sum / (float)reader->num_channels;
     return 0;
 }
 
-static int analyze_wav_pcm(FILE *fp,
-                           long data_chunk_offset,
-                           uint32_t data_chunk_size,
-                           uint16_t num_channels,
-                           uint32_t sample_rate,
-                           uint16_t bits_per_sample,
-                           int debug) {
+static int analyze_sample_stream(sample_reader_fn reader,
+                                 void *reader_ctx,
+                                 uint64_t total_frames,
+                                 uint16_t num_channels,
+                                 uint32_t sample_rate,
+                                 uint16_t bits_per_sample,
+                                 int debug) {
     uint32_t bytes_per_sample = bits_per_sample / 8;
     uint32_t frame_size = num_channels * bytes_per_sample;
-    uint64_t total_frames = 0;
     uint64_t total_samples = 0;
     double duration_seconds = 0.0;
     float min_sample = 1.0f;
@@ -116,7 +125,6 @@ static int analyze_wav_pcm(FILE *fp,
         window_samples = 1;
     }
 
-    total_frames = data_chunk_size / frame_size;
     total_samples = total_frames * num_channels;
     duration_seconds = (double)total_frames / (double)sample_rate;
 
@@ -155,22 +163,13 @@ static int analyze_wav_pcm(FILE *fp,
                target_freq);
     }
 
-    if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
-        fprintf(stderr, "Error: could not seek to data chunk\n");
-        free(tone_present);
-        free(window_powers);
-        return 1;
-    }
-
     for (uint64_t frame = 0; frame < total_frames; frame++) {
         float mono_sample = 0.0f;
 
-        if (read_wav_mono_sample(fp,
-                                 num_channels,
-                                 bits_per_sample,
-                                 &mono_sample,
-                                 &min_sample,
-                                 &max_sample) != 0) {
+        if (reader(reader_ctx,
+                   &mono_sample,
+                   &min_sample,
+                   &max_sample) != 0) {
             fprintf(stderr, "Error: could not read PCM sample data\n");
             free(tone_present);
             free(window_powers);
@@ -313,6 +312,38 @@ static int analyze_wav_pcm(FILE *fp,
     free(tone_present);
     free(window_powers);
     return 0;
+}
+
+static int analyze_wav_pcm(FILE *fp,
+                           long data_chunk_offset,
+                           uint32_t data_chunk_size,
+                           uint16_t num_channels,
+                           uint32_t sample_rate,
+                           uint16_t bits_per_sample,
+                           int debug) {
+    uint32_t bytes_per_sample = bits_per_sample / 8;
+    uint32_t frame_size = num_channels * bytes_per_sample;
+    uint64_t total_frames = 0;
+    struct wav_sample_reader reader;
+
+    if (fseek(fp, data_chunk_offset, SEEK_SET) != 0) {
+        fprintf(stderr, "Error: could not seek to data chunk\n");
+        return 1;
+    }
+
+    total_frames = data_chunk_size / frame_size;
+
+    reader.fp = fp;
+    reader.num_channels = num_channels;
+    reader.bits_per_sample = bits_per_sample;
+
+    return analyze_sample_stream(&read_wav_mono_sample,
+                                 &reader,
+                                 total_frames,
+                                 num_channels,
+                                 sample_rate,
+                                 bits_per_sample,
+                                 debug);
 }
 
 int main(int argc, char *argv[]) {
