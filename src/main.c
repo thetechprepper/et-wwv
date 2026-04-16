@@ -9,6 +9,8 @@
 #include <getopt.h>
 #include <unistd.h>
 
+enum { RIFF_CHUNK_HEADER_SIZE = 8 };
+
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
 }
@@ -27,7 +29,7 @@ static uint32_t read_le32(const unsigned char *buf) {
 int main(int argc, char *argv[]) {
     const char *file_path = NULL;
     unsigned char header[12];
-    unsigned char chunk_header[8];
+    unsigned char chunk_header[RIFF_CHUNK_HEADER_SIZE];
     unsigned char fmt_data[16];
     int debug = 0;
     int found_fmt = 0;
@@ -192,7 +194,6 @@ int main(int argc, char *argv[]) {
     if (bits_per_sample != 8 && bits_per_sample != 16 && bits_per_sample != 32) {
         fprintf(stderr, "Error: unsupported bits per sample: %u\n", bits_per_sample);
         fclose(fp);
-        usage(argv[0]);
         return 1;
     }
 
