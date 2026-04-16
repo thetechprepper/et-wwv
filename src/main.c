@@ -9,13 +9,16 @@
 #include <getopt.h>
 #include <unistd.h>
 
+#include <alsa/asoundlib.h>
+
 enum {
     RIFF_CHUNK_HEADER_SIZE = 8,
-    SAMPLE_BUFFER_FRAMES = 1024
+    SAMPLE_BUFFER_FRAMES = 1024,
+    DEFAULT_ALSA_CAPTURE_SECONDS = 60
 };
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
+    fprintf(stderr, "Usage: %s (-f <file> | -a) [-d]\n", prog);
 }
 
 // Reads a little-endian 16-bit value; requires at least 2 bytes
@@ -39,6 +42,12 @@ typedef int (*sample_reader_fn)(void *ctx,
 
 struct wav_sample_reader {
     FILE *fp;
+    uint16_t num_channels;
+    uint16_t bits_per_sample;
+};
+
+struct alsa_sample_reader {
+    snd_pcm_t *pcm;
     uint16_t num_channels;
     uint16_t bits_per_sample;
 };
@@ -127,6 +136,49 @@ static int read_wav_mono_samples(void *ctx,
         }
 
         mono_samples[i] = sum / (float)reader->num_channels;
+    }
+
+    return 0;
+}
+
+static int read_alsa_mono_samples(void *ctx,
+                                  float *mono_samples,
+                                  uint32_t sample_count,
+                                  float *min_sample,
+                                  float *max_sample) {
+    struct alsa_sample_reader *reader = (struct alsa_sample_reader *)ctx;
+    int16_t pcm_buf[SAMPLE_BUFFER_FRAMES];
+    snd_pcm_sframes_t frames_read;
+
+    if (sample_count > SAMPLE_BUFFER_FRAMES) {
+        return 1;
+    }
+
+    frames_read = snd_pcm_readi(reader->pcm, pcm_buf, sample_count);
+    if (frames_read == -EPIPE) {
+        if (snd_pcm_prepare(reader->pcm) < 0) {
+            return 1;
+        }
+
+        frames_read = snd_pcm_readi(reader->pcm, pcm_buf, sample_count);
+    }
+
+    if (frames_read < 0 || (uint32_t)frames_read != sample_count) {
+        return 1;
+    }
+
+    for (uint32_t i = 0; i < sample_count; i++) {
+        float sample_value = (float)pcm_buf[i] / 32768.0f;
+
+        if (sample_value < *min_sample) {
+            *min_sample = sample_value;
+        }
+
+        if (sample_value > *max_sample) {
+            *max_sample = sample_value;
+        }
+
+        mono_samples[i] = sample_value;
     }
 
     return 0;
@@ -453,12 +505,114 @@ static int analyze_wav_pcm(FILE *fp,
                                  debug);
 }
 
+static int analyze_alsa_pcm(int debug) {
+    const char *device_name = "default";
+    snd_pcm_t *pcm = NULL;
+    snd_pcm_hw_params_t *hw_params = NULL;
+    struct alsa_sample_reader reader;
+    uint32_t sample_rate = 48000;
+    uint16_t num_channels = 1;
+    uint16_t bits_per_sample = 16;
+    uint64_t total_frames = (uint64_t)sample_rate * DEFAULT_ALSA_CAPTURE_SECONDS;
+    int err;
+
+    err = snd_pcm_open(&pcm, device_name, SND_PCM_STREAM_CAPTURE, 0);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not open ALSA capture device '%s': %s\n",
+                device_name, snd_strerror(err));
+        return 1;
+    }
+
+    snd_pcm_hw_params_alloca(&hw_params);
+
+    err = snd_pcm_hw_params_any(pcm, hw_params);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not initialize ALSA hardware parameters: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_hw_params_set_access(pcm, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not set ALSA access mode: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_hw_params_set_format(pcm, hw_params, SND_PCM_FORMAT_S16_LE);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not set ALSA sample format: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_hw_params_set_channels(pcm, hw_params, num_channels);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not set ALSA channel count: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_hw_params_set_rate_near(pcm, hw_params, &sample_rate, NULL);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not set ALSA sample rate: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_hw_params(pcm, hw_params);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not apply ALSA hardware parameters: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    err = snd_pcm_prepare(pcm);
+    if (err < 0) {
+        fprintf(stderr, "Error: could not prepare ALSA device: %s\n",
+                snd_strerror(err));
+        snd_pcm_close(pcm);
+        return 1;
+    }
+
+    if (debug) {
+        printf("Debug: opened ALSA capture device: %s\n", device_name);
+        printf("Debug: sample_rate=%u channels=%u bits_per_sample=%u capture_seconds=%u\n",
+               sample_rate,
+               num_channels,
+               bits_per_sample,
+               DEFAULT_ALSA_CAPTURE_SECONDS);
+    }
+
+    reader.pcm = pcm;
+    reader.num_channels = num_channels;
+    reader.bits_per_sample = bits_per_sample;
+
+    err = analyze_sample_stream(&read_alsa_mono_samples,
+                                &reader,
+                                total_frames,
+                                num_channels,
+                                sample_rate,
+                                bits_per_sample,
+                                debug);
+
+    snd_pcm_close(pcm);
+    return err;
+}
+
 int main(int argc, char *argv[]) {
     const char *file_path = NULL;
     unsigned char header[12];
     unsigned char chunk_header[RIFF_CHUNK_HEADER_SIZE];
     unsigned char fmt_data[16];
     int debug = 0;
+    int use_alsa = 0;
     int found_fmt = 0;
     int found_data = 0;
     uint16_t audio_format = 0;
@@ -470,16 +624,20 @@ int main(int argc, char *argv[]) {
 
     static struct option long_options[] = {
         {"file", required_argument, 0, 'f'},
+        {"alsa", no_argument, 0, 'a'},
         {"help", no_argument, 0, 'h'},
         {"debug", no_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "f:hd", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "f:ahd", long_options, NULL)) != -1) {
         switch (opt) {
             case 'f':
                 file_path = optarg;
+                break;
+            case 'a':
+                use_alsa = 1;
                 break;
             case 'd':
                 debug = 1;
@@ -493,9 +651,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (file_path == NULL) {
+    if ((file_path == NULL && !use_alsa) || (file_path != NULL && use_alsa)) {
         usage(argv[0]);
         return 1;
+    }
+
+    if (use_alsa) {
+        return analyze_alsa_pcm(debug);
     }
 
     FILE *fp = fopen(file_path, "rb");
