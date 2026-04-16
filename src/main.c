@@ -25,7 +25,16 @@ enum {
 };
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s (-f <file> | -a [--device <name>]) [-d] [--seconds <n>]\n", prog);
+    fprintf(stderr,
+        "Usage: %s (-f <file> | -a [--device <name>]) [-d] [--seconds <n>]\n\n"
+        "Options:\n"
+        "  -f, --file <file>     Path to WAV file for offline analysis\n"
+        "  -a, --alsa            Use ALSA capture (live audio input)\n"
+        "  -D, --device <name>   ALSA device name (default: \"default\")\n"
+        "  -s, --seconds <n>     Max capture duration in seconds (default: 120)\n"
+        "  -d, --debug           Enable verbose debug output\n"
+        "  -h, --help            Show this help message\n",
+        prog);
 }
 
 // Reads a little-endian 16-bit value; requires at least 2 bytes
