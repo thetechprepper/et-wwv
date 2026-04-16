@@ -1,10 +1,13 @@
+#include <errno.h>
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <getopt.h>
 #include <string.h>
-#include <stdint.h>
-#include <math.h>
+
+// POSIX / GNU
+#include <getopt.h>
+#include <unistd.h>
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
@@ -68,8 +71,8 @@ int main(int argc, char *argv[]) {
 
     FILE *fp = fopen(file_path, "rb");
     if (fp == NULL) {
-        fprintf(stderr, "Error: file not found: %s\n", file_path);
-        usage(argv[0]);
+        fprintf(stderr, "Error opening file '%s': %s\n",
+            file_path, strerror(errno));
         return 1;
     }
 
