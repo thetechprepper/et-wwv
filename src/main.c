@@ -151,7 +151,13 @@ static int get_next_minute_time(struct timespec *ts) {
 
 static int set_system_time(const struct timespec *ts) {
     if (clock_settime(CLOCK_REALTIME, ts) != 0) {
-        fprintf(stderr, "Error: could not set system clock: %s\n", strerror(errno));
+        fprintf(stderr, "\033[31mError: could not set system clock: %s\033[0m\n",
+            strerror(errno));
+
+        if (errno == EPERM) {
+            fprintf(stderr, "\033[33mHint: re-run with sudo\033[0m\n");
+        }
+
         return 1;
     }
 
