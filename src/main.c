@@ -15,10 +15,12 @@ static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
 }
 
+// Reads a little-endian 16-bit value from buf (requires at least 2 bytes)
 static uint16_t read_le16(const unsigned char *buf) {
     return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 }
 
+// Reads a little-endian 32-bit value from buf (requires at least 4 bytes)
 static uint32_t read_le32(const unsigned char *buf) {
     return (uint32_t)buf[0]
          | ((uint32_t)buf[1] << 8)
@@ -102,6 +104,7 @@ int main(int argc, char *argv[]) {
         printf("Debug: valid RIFF/WAVE header detected\n");
     }
 
+    // Main WAV parsing loop: read and process RIFF chunks one at a time
     while (fread(chunk_header, 1, sizeof(chunk_header), fp) == sizeof(chunk_header)) {
         uint32_t chunk_size = read_le32(chunk_header + 4);
 
