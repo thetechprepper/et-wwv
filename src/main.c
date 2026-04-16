@@ -15,7 +15,7 @@
 enum {
     RIFF_CHUNK_HEADER_SIZE = 8,
     SAMPLE_BUFFER_FRAMES = 1024,
-    DEFAULT_ALSA_CAPTURE_SECONDS = 60
+    DEFAULT_ALSA_CAPTURE_SECONDS = 120
 };
 
 static void usage(const char *prog) {
