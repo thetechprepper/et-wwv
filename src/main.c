@@ -9,7 +9,10 @@
 #include <getopt.h>
 #include <unistd.h>
 
-enum { RIFF_CHUNK_HEADER_SIZE = 8 };
+enum {
+    RIFF_CHUNK_HEADER_SIZE = 8,
+    SAMPLE_BUFFER_FRAMES = 1024
+};
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s -f <file> [-d]\n", prog);
@@ -29,7 +32,8 @@ static uint32_t read_le32(const unsigned char *buf) {
 }
 
 typedef int (*sample_reader_fn)(void *ctx,
-                                float *mono_sample,
+                                float *mono_samples,
+                                uint32_t sample_count,
                                 float *min_sample,
                                 float *max_sample);
 
@@ -81,45 +85,50 @@ struct detector_state {
     int *tone_present;
 };
 
-static int read_wav_mono_sample(void *ctx,
-                                float *mono_sample,
-                                float *min_sample,
-                                float *max_sample) {
+static int read_wav_mono_samples(void *ctx,
+                                 float *mono_samples,
+                                 uint32_t sample_count,
+                                 float *min_sample,
+                                 float *max_sample) {
     struct wav_sample_reader *reader = (struct wav_sample_reader *)ctx;
     uint32_t bytes_per_sample = reader->bits_per_sample / 8;
     unsigned char sample_buf[4];
-    float sum = 0.0f;
 
-    for (uint16_t channel = 0; channel < reader->num_channels; channel++) {
-        float sample_value = 0.0f;
+    for (uint32_t i = 0; i < sample_count; i++) {
+        float sum = 0.0f;
 
-        if (fread(sample_buf, 1, bytes_per_sample, reader->fp) != bytes_per_sample) {
-            return 1;
+        for (uint16_t channel = 0; channel < reader->num_channels; channel++) {
+            float sample_value = 0.0f;
+
+            if (fread(sample_buf, 1, bytes_per_sample, reader->fp) != bytes_per_sample) {
+                return 1;
+            }
+
+            if (reader->bits_per_sample == 8) {
+                uint8_t s = sample_buf[0];
+                sample_value = ((float)s - 128.0f) / 128.0f;
+            } else if (reader->bits_per_sample == 16) {
+                int16_t s = (int16_t)read_le16(sample_buf);
+                sample_value = (float)s / 32768.0f;
+            } else if (reader->bits_per_sample == 32) {
+                int32_t s = (int32_t)read_le32(sample_buf);
+                sample_value = (float)s / 2147483648.0f;
+            }
+
+            if (sample_value < *min_sample) {
+                *min_sample = sample_value;
+            }
+
+            if (sample_value > *max_sample) {
+                *max_sample = sample_value;
+            }
+
+            sum += sample_value;
         }
 
-        if (reader->bits_per_sample == 8) {
-            uint8_t s = sample_buf[0];
-            sample_value = ((float)s - 128.0f) / 128.0f;
-        } else if (reader->bits_per_sample == 16) {
-            int16_t s = (int16_t)read_le16(sample_buf);
-            sample_value = (float)s / 32768.0f;
-        } else if (reader->bits_per_sample == 32) {
-            int32_t s = (int32_t)read_le32(sample_buf);
-            sample_value = (float)s / 2147483648.0f;
-        }
-
-        if (sample_value < *min_sample) {
-            *min_sample = sample_value;
-        }
-
-        if (sample_value > *max_sample) {
-            *max_sample = sample_value;
-        }
-
-        sum += sample_value;
+        mono_samples[i] = sum / (float)reader->num_channels;
     }
 
-    *mono_sample = sum / (float)reader->num_channels;
     return 0;
 }
 
@@ -232,6 +241,14 @@ static void detector_process_sample(struct detector_state *state, float mono_sam
         state->q1 = 0.0;
         state->q2 = 0.0;
         state->window_index = 0;
+    }
+}
+
+static void detector_process_samples(struct detector_state *state,
+                                     const float *mono_samples,
+                                     uint32_t sample_count) {
+    for (uint32_t i = 0; i < sample_count; i++) {
+        detector_process_sample(state, mono_samples[i]);
     }
 }
 
@@ -364,6 +381,8 @@ static int analyze_sample_stream(sample_reader_fn reader,
                                  uint16_t bits_per_sample,
                                  int debug) {
     struct detector_state state;
+    float mono_samples[SAMPLE_BUFFER_FRAMES];
+    uint64_t frames_remaining = total_frames;
 
     if (detector_init(&state,
                       total_frames,
@@ -374,11 +393,14 @@ static int analyze_sample_stream(sample_reader_fn reader,
         return 1;
     }
 
-    for (uint64_t frame = 0; frame < total_frames; frame++) {
-        float mono_sample = 0.0f;
+    while (frames_remaining > 0) {
+        uint32_t chunk_frames = frames_remaining > SAMPLE_BUFFER_FRAMES
+            ? SAMPLE_BUFFER_FRAMES
+            : (uint32_t)frames_remaining;
 
         if (reader(reader_ctx,
-                   &mono_sample,
+                   mono_samples,
+                   chunk_frames,
                    &state.min_sample,
                    &state.max_sample) != 0) {
             fprintf(stderr, "Error: could not read PCM sample data\n");
@@ -386,7 +408,8 @@ static int analyze_sample_stream(sample_reader_fn reader,
             return 1;
         }
 
-        detector_process_sample(&state, mono_sample);
+        detector_process_samples(&state, mono_samples, chunk_frames);
+        frames_remaining -= chunk_frames;
     }
 
     if (detector_finish(&state) != 0) {
@@ -421,7 +444,7 @@ static int analyze_wav_pcm(FILE *fp,
     reader.num_channels = num_channels;
     reader.bits_per_sample = bits_per_sample;
 
-    return analyze_sample_stream(&read_wav_mono_sample,
+    return analyze_sample_stream(&read_wav_mono_samples,
                                  &reader,
                                  total_frames,
                                  num_channels,
