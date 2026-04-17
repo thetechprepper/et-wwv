@@ -161,6 +161,10 @@ static int get_next_minute_time(struct timespec *ts) {
         return 1;
     }
 
+    // Drift the clock ahead 800ms to compensate for the end of the tone
+    // calculation which is ~800ms long.
+    ts->tv_nsec += 800000000L;
+
     return 0;
 }
 
@@ -418,6 +422,8 @@ static int detector_process_live_window(struct detector_state *state, double pow
 
             if (state->set_clock_enabled) {
                 print_local_time("Setting system time", state->target_time.tv_sec);
+
+
 
                 if (set_system_time(&state->target_time) != 0) {
                     return -1;
